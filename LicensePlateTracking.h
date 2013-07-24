@@ -28,4 +28,6 @@ IplImage* ippResize(Mat& src, double xFactor, double yFactor);
 
 void detectKeypoints(Mat& image, int fastThreshold, Rect roiRect, vector<KeyPoint>& keypoints);
 
+void trackKeypoints(Mat& currentFrame, Mat& previousFrame, vector<KeyPoint>& currentKeypoints, vector<KeyPoint>& previousKeypoints);
+
 #endif

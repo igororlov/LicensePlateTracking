@@ -1,20 +1,33 @@
 #include "LicensePlateTracking.h"
 
 #define FILENAME "C:\\Main\\Work\\Video\\kazahstan.avi"
+//#define FILENAME "C:\\Main\\Work\\Video\\TWN.avi"
 #define COLOR_PURPLE Scalar(255,0,255)
+#define COLOR_GREEN Scalar(0,255,0)
 
-// предположение о максимально возможном смещении номера на след. кадре
-#define maxHorisontalShift 100 
-#define maxVerticalShift 80
+// max possible plate coordinates shift on next frame
+#define MAX_HORISONTAL_SHIFT 60 
+#define MAX_VERTICAL_SHIFT 35
 
-static Point topLeft(0, 0);
-static Point botRight;
+#define SCALE_X 0.5
+#define SCALE_Y 0.5
+
+#define FAST_THRESH 20
+
+static Point2d topLeft(0, 0); // plate coords and size
+static Point2d botRight;
+static Size plateSize;
+
 static bool isSettingTopLeft = true;
+static bool isPlateRectangleDefined = false;
+static bool isNewPlateDefined = true;
+
+static vector<Point> plateCoords; 
 
 int main() {
 	VideoCapture capture;
 	Mat currentFrame, previousFrame;
-	int nFrames, frameNo;
+	int nFrames, frameNo, frameWidth, frameHeight;
 	vector<KeyPoint> currentKeypoints, previousKeypoints;
 	bool stop = false;
 	double rate, delay;
@@ -23,7 +36,9 @@ int main() {
 	nFrames = (int)capture.get(CV_CAP_PROP_FRAME_COUNT);
 	rate = capture.get(CV_CAP_PROP_FPS);
 	delay = 1000 / rate;
-	botRight = Point((int)capture.get(CV_CAP_PROP_FRAME_WIDTH), (int)capture.get(CV_CAP_PROP_FRAME_HEIGHT));
+	frameWidth = (int)capture.get(CV_CAP_PROP_FRAME_WIDTH);
+	frameHeight = (int)capture.get(CV_CAP_PROP_FRAME_HEIGHT);
+	botRight = Point(frameWidth, frameHeight);
 
 	namedWindow("Frame");
 	setMouseCallback("Frame", onMouseCallback, 0);
@@ -31,7 +46,8 @@ int main() {
 	frameNo = 0;
 
 	while ( !stop ) {
-		previousFrame.data = currentFrame.data;
+		currentFrame.copyTo(previousFrame);
+		currentFrame.release();
 		swap(currentKeypoints, previousKeypoints);
 		currentKeypoints.clear();
 		frameNo++;
@@ -40,14 +56,34 @@ int main() {
 			break;
 		}
 		
-		IplImage* resizedIpl = ippResize(currentFrame, 1, 1);
+		IplImage* resizedIpl = ippResize(currentFrame, SCALE_X, SCALE_Y);
 		Mat resized(resizedIpl);
-		
-		Rect roiRect(topLeft, botRight);
-		detectKeypoints(resized, 25, roiRect, currentKeypoints);
-		//drawKeypoints(resized, currentKeypoints, resized, COLOR_PURPLE); // времяемкая!
-		printf("Frame: %d; currentFrame Address: %u; resized Address: %u;\n", frameNo, currentFrame.data, resized.data);
-		
+		currentFrame.release();
+		resized.copyTo(currentFrame);
+
+		if ( isPlateRectangleDefined ) {
+			Point p1 = Point(topLeft.x - SCALE_X * MAX_HORISONTAL_SHIFT, topLeft.y - SCALE_Y * MAX_VERTICAL_SHIFT);
+			Point p2 = Point(botRight.x + SCALE_X * MAX_HORISONTAL_SHIFT, botRight.y + SCALE_Y * MAX_VERTICAL_SHIFT);
+			Rect roiRect(p1, p2);
+
+			if ( p1.x > 0 && p1.y > 0 && p2.x < currentFrame.cols && p2.y < currentFrame.rows ) {
+				detectKeypoints(currentFrame, FAST_THRESH, roiRect, currentKeypoints);
+				//drawKeypoints(currentFrame, currentKeypoints, currentFrame, COLOR_PURPLE); // time-consuming!
+				if ( isNewPlateDefined ) {
+					previousKeypoints.clear();
+					isNewPlateDefined = false;
+				}
+				if ( previousKeypoints.size() > 0 && currentKeypoints.size() > 0 ) {	
+					trackKeypoints(currentFrame, previousFrame, currentKeypoints, previousKeypoints);
+				}
+			} else {
+				isPlateRectangleDefined = false;
+				plateCoords.clear();
+			}
+		}
+		//printf("Frame: %d; currentFrame Address: %u; prevFrame Address: %u;\n", frameNo, currentFrame.data, previousFrame.data);
+		//printf("Frame: %d; TopLeft(%d, %d); BotRight(%d, %d);\n", frameNo, topLeft.x, topLeft.y, botRight.x, botRight.y);
+
 		int key = waitKey((int)delay); 
 		if ( key == 27 ) {
 			stop = true;
@@ -55,9 +91,8 @@ int main() {
 		else if ( key == 32 ) {	
 			waitKey(0);
 		}
-
-		imshow("Frame", resized);
-
+		
+		imshow("Frame", currentFrame);
 		previousFrame.release();		
 		cvReleaseData(resizedIpl);
 	}
@@ -70,17 +105,24 @@ int main() {
 void onMouseCallback(int event, int x, int y, int flags, void* param) {
 	if ( event == CV_EVENT_LBUTTONDOWN ) {
 		if ( isSettingTopLeft ) {
-			if ( x <= botRight.x && y <= botRight.y ) {
-				topLeft.x = x;
-				topLeft.y = y;
-			}
+			topLeft.x = x;
+			topLeft.y = y;
+			printf("TopLeft: (%d, %d);\n", x, y);
 		} else {
-			if ( x >= topLeft.x && y >= topLeft.y ) {
-				botRight.x = x;
-				botRight.y = y;
-			}
+			botRight.x = x;
+			botRight.y = y;
+			isPlateRectangleDefined = true;
+			plateSize = Size(botRight.x - topLeft.x, botRight.y - topLeft.y);
+			isNewPlateDefined = true;
+
+			plateCoords.clear();
+			plateCoords.push_back(Point((topLeft.x+botRight.x)/2,(topLeft.y+botRight.y)/2));
+			printf("BotRight: (%d, %d); PlateSize: (%d, %d);\n", x, y, plateSize.width, plateSize.height);
 		}
 		isSettingTopLeft = !isSettingTopLeft;
+	} else if ( event == CV_EVENT_RBUTTONDOWN ) {
+		isPlateRectangleDefined = false;
+		plateCoords.clear();
 	}
 }
 
@@ -118,4 +160,75 @@ void detectKeypoints(Mat& image, int fastThreshold, Rect roiRect, vector<KeyPoin
 		keypoints[i].pt.x += roiRect.x;
 		keypoints[i].pt.y += roiRect.y;
 	}
+}
+
+void trackKeypoints(Mat& currentFrame, Mat& previousFrame, vector<KeyPoint>& currentKeypoints, vector<KeyPoint>& previousKeypoints) {
+	Mat currentFrameDescriptors, previousFrameDescriptors, matchesImage;
+	vector<DMatch> matches;
+	BruteForceMatcher<Hamming> matcher;
+	BriefDescriptorExtractor extractor;
+	
+	extractor.compute(currentFrame, currentKeypoints, currentFrameDescriptors); // keypts size can change!
+	extractor.compute(previousFrame, previousKeypoints, previousFrameDescriptors);
+
+	if ( currentKeypoints.size() == 0 || previousKeypoints.size() == 0 ) {
+		isPlateRectangleDefined = false;
+		return;
+	}
+
+	try {
+		matcher.match(previousFrameDescriptors, currentFrameDescriptors, matches);
+	} catch (Exception ex) {
+		cout << ex.msg << endl;
+		cout << ex.err << endl;
+	}
+
+/*	drawMatches(previousFrame, previousKeypoints, currentFrame, currentKeypoints, matches, matchesImage);
+	namedWindow("Matches");
+	imshow("Matches", matchesImage);
+	waitKey(0);*/
+
+	int plateKeypointsCounter = 0;
+	double xShift = 0.0, yShift = 0.0;
+
+	for ( int i = 0; i < previousKeypoints.size(); i++ ) {
+		Point kpt = previousKeypoints[i].pt;
+
+		//if ( kpt.x >= topLeft.x && kpt.y >= topLeft.y && 
+		//	kpt.x <= botRight.x && kpt.y <= botRight.y ) { // только те, что сейчас в номере
+
+		KeyPoint currentKeypoint = currentKeypoints[matches[i].trainIdx];
+		xShift += currentKeypoint.pt.x - kpt.x;
+		yShift += currentKeypoint.pt.y - kpt.y;
+		plateKeypointsCounter++;
+		//}
+	}
+	xShift /= plateKeypointsCounter;
+	yShift /= plateKeypointsCounter;
+
+	//cout << "xShift: " << xShift << "; yShift: " << yShift << endl;
+
+	topLeft.x += xShift;
+	topLeft.y += yShift;
+	botRight.x += xShift;
+	botRight.y += yShift;
+
+	Rect plateNewRect(topLeft, botRight);
+	rectangle(currentFrame, plateNewRect, COLOR_GREEN, 2);
+	
+	plateCoords.push_back(Point(plateNewRect.x+plateNewRect.width/2, plateNewRect.y+plateNewRect.height/2));
+	if ( plateCoords.size() > 1 )
+	for ( int i = 1; i < plateCoords.size(); i++ ) {
+		line(currentFrame, plateCoords[i], plateCoords[i-1], COLOR_GREEN);
+	}
+
+	matchesImage.release();
+	currentFrameDescriptors.release();
+	previousFrameDescriptors.release();
+}
+
+// TO DO:
+void kalmanTracking() {
+	KalmanFilter KF(4, 2, 0);
+
 }
